@@ -1,0 +1,40 @@
+# ---- ROMs and anything extracted from one. Never commit these. ----
+*.nes
+*.gb
+*.gbc
+*.sfc
+*.smc
+*.md
+*.gba
+*.z64
+*.iso
+*.gcm
+*.rvz
+*.srm
+*.sav
+*.state
+*.patch
+baserom*
+# ... but these are documents, not Sega Genesis ROMs:
+!STATUS.md
+!THIRD_PARTY.md
+!web/THIRD_PARTY.md
+# ... and the vendored EmulatorJS tree keeps its own READMEs:
+!web/data/**/*.md
+
+# the upstream disassembly is cloned by build.sh, not vendored
+upstream/
+
+# build and test artefacts
+test/out/
+test/__pycache__/
+tools/__pycache__/
+*.pyc
+*.sym
+*.map
+*.2bpp
+*.1bpp
+*.lz
+*.gbcpal
+*.dimensions
+*.sgb.tilemap
