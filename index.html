@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<!-- connect-src 'self' blob: data: is the browser-enforced half of "never uploaded".
+     This is the real boundary: no script on this page can reach a remote origin even
+     if it tries, which also means EmulatorJS's own CDN version ping simply fails. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' blob: data:; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; connect-src 'self' blob: data:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:; media-src 'self' blob: data:; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Pokémon Trading Card Game — bring your own ROM</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230e1118'/%3E%3Crect x='3.5' y='2.5' width='9' height='11' rx='1.3' fill='%23e8b923'/%3E%3Crect x='5' y='4' width='6' height='5' rx='.6' fill='%230e1118'/%3E%3C/svg%3E">
+<script src="no-phone-home.js"></script>
+<style>
+  :root { --bg:#0e1118; --panel:#171c26; --fg:#e8ecf4; --dim:#97a1b4; --accent:#e8b923;
+          --accent2:#4c7fe0; --line:#28303e; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #wrap { display:flex; flex-direction:column; height:100%; }
+  /* The player element is laid out permanently here and NEVER styled inline:
+     emulator.js:352 does parent.setAttribute("style", ...), which wipes the whole
+     inline style attribute, and the core then renders 60fps into a 0x0 box while
+     reporting started:true. The picker is an overlay above this, not a style change. */
+  #game { flex:1; min-height:0; background:#000; }
+  #bar { padding:8px 14px; color:var(--dim); font-size:12px; display:flex; gap:18px;
+    flex-wrap:wrap; align-items:baseline; border-top:1px solid var(--line); }
+  #bar b { color:var(--fg); font-weight:600; }
+  code, #sha { font:11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--dim); }
+
+  /* ---- ROM picker overlay ---- */
+  #pick { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    padding:16px; background:radial-gradient(60% 60% at 50% 32%, #1b2231, var(--bg)); z-index:10; }
+  #card { width:min(660px, 100%); background:var(--panel); border:1px solid var(--line);
+    border-radius:14px; padding:22px 24px 20px; }
+  h1 { margin:0 0 2px; font-size:21px; letter-spacing:.01em; }
+  h1 span { color:var(--accent); }
+  .sub { margin:0 0 18px; color:var(--dim); font-size:13px; }
+  #drop { border:1.5px dashed #3b475c; border-radius:11px; padding:26px 18px; text-align:center;
+    cursor:pointer; transition:border-color .15s, background .15s; }
+  #drop.hot { border-color:var(--accent); background:#1f2735; }
+  #drop .big { font-size:15px; color:var(--fg); margin-bottom:5px; }
+  #drop .small { color:var(--dim); font-size:12px; }
+  #file { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+  ul.notes { margin:16px 0 0; padding-left:18px; color:var(--dim); font-size:12px; }
+  ul.notes li { margin:3px 0; }
+  ul.notes b { color:var(--fg); font-weight:600; }
+  #err { margin-top:12px; color:#e6734f; font-size:12.5px; display:none; }
+  #ok { margin-top:12px; color:#8fbf6a; font-size:12.5px; display:none; }
+  .keys { margin-top:14px; padding-top:12px; border-top:1px solid var(--line);
+    color:var(--dim); font-size:12px; }
+  kbd { border:1px solid #3b475c; border-bottom-width:2px; border-radius:4px; padding:0 5px;
+    font:11px ui-monospace, monospace; color:var(--fg); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="game"></div>
+  <div id="bar">
+    <span id="b-title"><b>Pokémon Trading Card Game</b></span>
+    <span id="b-sha"></span>
+    <span id="b-save">save: waiting for first write</span>
+    <span id="b-priv">ROM is in this tab's memory only</span>
+  </div>
+</div>
+
+<div id="pick">
+  <div id="card">
+    <h1>Pokémon <span>Trading Card Game</span></h1>
+    <p class="sub">Built from the <code>pret/poketcg</code> disassembly. Load the ROM you built, or your own cartridge dump.</p>
+
+    <div id="drop" tabindex="0" role="button" aria-label="Choose a ROM file">
+      <div class="big">Choose a <code>.gbc</code> file, or drop one here</div>
+      <div class="small">poketcg.gbc &middot; 1,048,576 bytes</div>
+    </div>
+    <input type="file" id="file" accept=".gbc,.gb,application/octet-stream">
+
+    <div id="err"></div>
+    <div id="ok"></div>
+
+    <ul class="notes">
+      <li>The file is read with <code>FileReader</code> and handed straight to the emulator core. <b>It is never uploaded.</b> There is no server side here — the page's content-security-policy pins <code>connect-src</code> to its own origin, so the <i>browser</i> refuses any outbound request, and a runtime guard refuses and logs one too.</li>
+      <li>Battery saves — your collection, your decks, your name, and a duel suspended mid-game — persist in this browser's IndexedDB and survive a reload. Clearing site data clears them.</li>
+      <li>No ROM, and nothing extracted from one, ships with this page.</li>
+    </ul>
+
+    <div class="keys">
+      <kbd>&larr;&uarr;&darr;&rarr;</kbd> D-pad &middot; <kbd>X</kbd> A &middot; <kbd>Z</kbd> B &middot;
+      <kbd>Enter</kbd> Start &middot; <kbd>Shift</kbd> Select &middot; gamepads and on-screen buttons work too
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var Q = new URLSearchParams(location.search);
+  var ROM_BYTES = 1048576;                      // 1 MiB, MBC5+RAM+BATTERY
+
+  // sha1 -> what upstream pret/poketcg calls it. Anything else still loads.
+  var KNOWN = {
+    "0f8670a583255cff3e5b7ca71b5d7454d928fc48":
+      { slug: "poketcg", title: "Pokémon Trading Card Game (U)" }
+  };
+
+  var el = function (id) { return document.getElementById(id); };
+  var pick = el("pick"), drop = el("drop"), fileInput = el("file"),
+      errBox = el("err"), okBox = el("ok");
+  var LOG = [];
+  function log(msg) { LOG.push(msg); console.log("TCG: " + msg); }
+
+  function fail(msg) {
+    errBox.textContent = msg; errBox.style.display = "block"; okBox.style.display = "none";
+    log("reject " + msg);
+  }
+
+  function hex(buf) {
+    var b = new Uint8Array(buf), s = "";
+    for (var i = 0; i < b.length; i++) s += (b[i] < 16 ? "0" : "") + b[i].toString(16);
+    return s;
+  }
+
+  function b64(u8) {
+    var s = "", N = 0x8000;
+    for (var i = 0; i < u8.length; i += N) {
+      s += String.fromCharCode.apply(null, u8.subarray(i, i + N));
+    }
+    return btoa(s);
+  }
+
+  // ---- the one entry point for ROM bytes. The file input, the drop handler and
+  // ---- the ?rom= test hook all funnel through here.
+  async function loadRom(bytes, originalName) {
+    if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
+    if (bytes.length !== ROM_BYTES) {
+      fail("That file is " + bytes.length.toLocaleString() + " bytes. A Pokémon TCG ROM is " +
+           ROM_BYTES.toLocaleString() + " bytes (1 MiB). Wrong file, or a trimmed/headered dump.");
+      return false;
+    }
+
+    // crypto.subtle only exists in a secure context (https:// or localhost). Over
+    // plain http from elsewhere we still want a stable per-ROM save name, so fall
+    // back to a cheap checksum rather than to nothing.
+    var sha1 = null, fallback = null;
+    try {
+      sha1 = hex(await crypto.subtle.digest("SHA-1", bytes));
+    } catch (e) {
+      var h = 2166136261;
+      for (var i = 0; i < bytes.length; i++) h = Math.imul(h ^ bytes[i], 16777619);
+      fallback = (h >>> 0).toString(16);
+    }
+    var known = sha1 ? KNOWN[sha1] : null;
+    var slug = known ? known.slug : "gbc-" + (sha1 ? sha1.slice(0, 12) : fallback);
+    var title = known ? known.title : (originalName || "Unknown GBC ROM");
+
+    // textContent, not innerHTML: `title` can be a filename the user chose, and a
+    // filename is not markup.
+    okBox.textContent = "Loaded " + title;
+    okBox.style.display = "block"; errBox.style.display = "none";
+    var b = document.createElement("b"); b.textContent = title;
+    el("b-title").replaceChildren(b);
+    var code = document.createElement("code");
+    code.id = "sha";
+    code.textContent = sha1
+      ? "sha1 " + sha1 + (known ? "  ✓ matches pret/poketcg"
+                                : "  · not a hash pret/poketcg builds")
+      : "sha1 unavailable (needs https:// or localhost) · saves keyed as " + slug;
+    el("b-sha").replaceChildren(code);
+    API.sha1 = sha1; API.size = bytes.length; API.slug = slug;
+    log("rom sha1=" + sha1 + " slug=" + slug + " known=" + !!known);
+
+    boot(bytes, slug, title);
+    return true;
+  }
+
+  // ---------------------------------------------------------------- emulator
+  function boot(bytes, slug, title) {
+    pick.remove();
+
+    // Passing a File (a Blob) means EmulatorJS reads it straight out of memory --
+    // downloadFile() short-circuits through toData() and never touches the network.
+    // The name matters: getBaseFileName() skips a blob: URL entirely and would fall
+    // back to a fresh UUID each load, so the .srm would land under a new name every
+    // time and the save would look lost.
+    window.EJS_gameUrl = new File([bytes], slug + ".gbc", { type: "application/octet-stream" });
+    window.EJS_gameName = slug;
+    window.EJS_player = "#game";
+    window.EJS_core = "gb";                 // -> gambatte
+    window.EJS_pathtodata = "data/";
+    window.EJS_startOnLoaded = true;
+    window.EJS_disableDatabases = true;     // no ROM cache / state DB; the .srm is on IDBFS, unaffected
+    window.EJS_CacheLimit = 0;              // belt and braces: never copy the ROM to IndexedDB
+    window.EJS_threads = false;             // no SharedArrayBuffer, so no COOP/COEP needed
+    window.EJS_color = "#e8b923";
+    window.EJS_volume = Q.has("mute") ? 0 : 0.5;
+    window.EJS_controlScheme = "gb";
+    window.EJS_defaultControls = {
+      0: {
+        8: { value: "x",           value2: "BUTTON_1" },      // A
+        0: { value: "z",           value2: "BUTTON_3" },      // B
+        2: { value: "shift",       value2: "SELECT" },
+        3: { value: "enter",       value2: "START" },
+        4: { value: "up arrow",    value2: "DPAD_UP" },
+        5: { value: "down arrow",  value2: "DPAD_DOWN" },
+        6: { value: "left arrow",  value2: "DPAD_LEFT" },
+        7: { value: "right arrow", value2: "DPAD_RIGHT" }
+      }, 1: {}, 2: {}, 3: {}
+    };
+
+    window.EJS_onGameStart = function () { onStart(slug); };
+
+    // --- EmulatorJS 4.2.3 destroys the battery save every time the page is left. ---
+    //
+    // emulator.js:1092 registers a `beforeunload` listener that fires its "exit"
+    // event; GameManager's exit handler (GameManager.js:44) ends with
+    //     FS.unmount("/data/saves")
+    // and the IndexedDB store backing that mount comes back EMPTY -- not stale,
+    // empty. Whether the teardown's writes beat the page dying is a race, so the
+    // bug produces green runs: navigating away and coming back passed 8/8 on a
+    // known-broken page elsewhere in this fleet. The deterministic test is to
+    // dispatch the event without unloading (tools/save_mechanism.py).
+    //
+    // addEventListener at emulator.js:82 does not keep the handle, so there is no
+    // removeEventListener to call. Filter the registration instead, and register
+    // our own handler, which writes and syncs and never unmounts.
+    var keepEjsUnload = Q.get("ejsunload") === "keep";   // control arm for the test
+    var realAdd = window.addEventListener.bind(window);
+    if (!keepEjsUnload) {
+      window.addEventListener = function (type, fn, opts) {
+        if (type === "beforeunload" && !(fn && fn.__keep)) return;
+        return realAdd(type, fn, opts);
+      };
+      log("dropped EmulatorJS's beforeunload (it unmounts /data/saves)");
+    } else {
+      log("kept EmulatorJS's beforeunload (control arm: the save is expected to die)");
+    }
+    API.ejsUnloadDropped = !keepEjsUnload;
+
+    var s = document.createElement("script");
+    s.src = "data/loader.js";
+    document.body.appendChild(s);
+  }
+
+  // ------------------------------------------------------------ save persistence
+  // The core writes <slug>.srm into /data/saves, which GameManager mounts as IDBFS
+  // with autoPersist. We still flush on a timer: autoPersist debounces, and a tab
+  // left alone mid-debounce would otherwise lose the write.
+  //
+  // Every flush is guarded by alive(), because syncing a directory that is no
+  // longer an IDBFS mount makes IDBFS's reconcile delete every remote entry it
+  // cannot see locally -- i.e. an unguarded flush after a teardown is destructive.
+  function installSaveFlush(emu, slug) {
+    var lastLen = -1, lastSum = -1;
+
+    // GameManager.mountFileSystems() creates "/data" and "/data/saves" and mounts
+    // IDBFS there -- but the save file does NOT go directly in it. RetroArch's
+    // config sets savefile_directory = "/data/saves" and the save lands in a
+    // per-core subdirectory under it, e.g. "/data/saves/Gambatte/poketcg.srm".
+    // Nothing in EmulatorJS creates that subdirectory. It has worked in every run
+    // here, so the core is making it itself, but the cost of being sure is one
+    // mkdir that throws EEXIST when it is already there (GameManager.mkdir
+    // swallows that), and the cost of being wrong is a save that silently never
+    // lands anywhere.
+    try {
+      var p = emu.gameManager.getSaveFilePath();
+      var dir = p.slice(0, p.lastIndexOf("/"));
+      if (dir && dir !== "/data/saves") {
+        emu.gameManager.mkdir(dir);
+        log("ensured save directory " + dir);
+      }
+    } catch (e) { log("could not pre-create the save directory: " + e); }
+
+    function cheapSum(a) {
+      var h = 0;
+      for (var i = 0; i < a.length; i += 7) h = (h * 31 + a[i]) | 0;
+      return h;
+    }
+
+    function alive() {
+      try {
+        var node = emu.gameManager.FS.lookupPath("/data/saves").node;
+        return !!(emu.started && node.mount && node.mount.opts && node.mount.opts.autoPersist);
+      } catch (e) { return false; }
+    }
+    API.alive = alive;
+
+    function flush(why, force) {
+      return new Promise(function (resolve) {
+        if (!alive()) { log("skip flush (" + why + "): mount is gone"); return resolve(null); }
+        var data = null;
+        // getSaveFile() with no argument calls saveSaveFiles() first, which writes
+        // the core's CURRENT SRAM over the file. That is what we want when
+        // flushing; it is exactly what you must not do when measuring.
+        try { data = emu.gameManager.getSaveFile(); } catch (e) { return resolve(null); }
+        if (!data || !data.length) return resolve(null);
+        var sum = cheapSum(data);
+        if (!force && data.length === lastLen && sum === lastSum) {
+          return resolve({ skipped: true, len: data.length, sum: sum });
+        }
+        lastLen = data.length; lastSum = sum;
+        try {
+          emu.gameManager.FS.syncfs(false, function () {
+            el("b-save").textContent = "save: " + (data.length / 1024) + " KiB stored in this browser · " +
+              new Date().toLocaleTimeString();
+            log("save flushed (" + why + ") bytes=" + data.length + " sum=" + sum);
+            resolve({ skipped: false, len: data.length, sum: sum });
+          });
+        } catch (e) { console.warn("TCG: syncfs failed", e); resolve(null); }
+      });
+    }
+    API.save = flush;
+
+    setInterval(function () { flush("tick"); }, 10000);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "hidden") flush("hidden");
+    });
+
+    // Our own beforeunload, marked so the filter installed in boot() lets it
+    // through. Synchronous work only: the page may not live long enough for
+    // syncfs's callback, but saveSaveFiles() has already put the bytes in the FS
+    // and autoPersist will push them, and nothing here unmounts anything.
+    function onUnload() {
+      if (!alive()) return;
+      try {
+        emu.gameManager.saveSaveFiles();
+        emu.gameManager.FS.syncfs(false, function () {});
+      } catch (e) { /* leaving anyway */ }
+    }
+    onUnload.__keep = true;
+    window.addEventListener("beforeunload", onUnload);
+
+    flush("boot");                       // reports a restored save, if there is one
+  }
+
+  function onStart(slug) {
+    var emu = window.EJS_emulator;
+    var t0 = performance.now();
+    API.started = true;
+    API.t0 = t0;
+    log("started");
+    installSaveFlush(emu, slug);
+
+    if (Q.has("mute")) { try { emu.setVolume(0); } catch (e) {} }
+
+    var press = function (id, dur) {
+      emu.gameManager.simulateInput(0, id, 1);
+      setTimeout(function () { emu.gameManager.simulateInput(0, id, 0); }, (dur || 0.1) * 1000);
+    };
+    window.__press = press;
+
+    // ?keys / ?mash / ?dump / ?hb -- the same shape as the other sites in this
+    // fleet. Note the harness drives presses itself rather than using these: a
+    // release scheduled on a page timer can land in the same task batch as the
+    // press when Chrome stalls the page for a screenshot, and the core polls
+    // neither edge.
+    (Q.get("keys") || "").split(",").filter(Boolean).forEach(function (e) {
+      var p = e.split(":");
+      setTimeout(function () { press(+p[1], +(p[2] || 0.1)); }, +p[0] * 1000);
+    });
+
+    if (Q.has("mash")) {
+      var m = Q.get("mash").split(":").map(Number);     // from:to:period (seconds)
+      for (var t = m[0]; t <= m[1]; t += (m[2] || 0.5)) {
+        (function (tt) { setTimeout(function () { press(8, 0.12); }, tt * 1000); })(t);
+      }
+    }
+
+    if (Q.has("hb")) setInterval(function () {
+      log("hb " + ((performance.now() - t0) / 1000).toFixed(0) + "s frame=" +
+          emu.gameManager.getFrameNum());
+    }, 5000);
+  }
+
+  // ------------------------------------------------------------------ test API
+  // Everything the headless harness needs, in one place. Nothing here is required
+  // for a person to play; it is all read-only introspection plus the save flush.
+  var API = window.__tcg = {
+    started: false,
+    log: function () { return LOG.slice(); },
+
+    frame: function () {
+      try { return window.EJS_emulator.gameManager.getFrameNum(); } catch (e) { return null; }
+    },
+    core: function () {
+      try { return window.EJS_emulator.getCore(); } catch (e) { return null; }
+    },
+
+    // Where the emulator's screen sits, so the driver can crop its screenshot to
+    // the canvas and not score page chrome as "picture".
+    //
+    // There is deliberately NO "read the canvas pixels" helper: drawImage() on this
+    // canvas returns an empty buffer because the WebGL context has no
+    // preserveDrawingBuffer, and a brightness check built on it reports perfect
+    // black while the game is plainly running. The driver's screenshot is the
+    // ground truth.
+    screen: function () {
+      var c = document.querySelector("#game canvas");
+      if (!c) return null;
+      var r = c.getBoundingClientRect();
+      return { ok: r.width > 0 && r.height > 0, w: c.width, h: c.height,
+               cssW: r.width, cssH: r.height,
+               x: r.left / innerWidth, y: r.top / innerHeight,
+               fw: r.width / innerWidth, fh: r.height / innerHeight };
+    },
+
+    // Is /data/saves still the IDBFS mount? autoPersist flipping to false is the
+    // fingerprint of EmulatorJS's exit handler having torn it down.
+    mount: function () {
+      try {
+        var n = window.EJS_emulator.gameManager.FS.lookupPath("/data/saves").node;
+        return { mounted: !!n.mount,
+                 autoPersist: !!(n.mount && n.mount.opts && n.mount.opts.autoPersist),
+                 type: (n.mount && n.mount.type && n.mount.type.name) || null };
+      } catch (e) { return { error: String(e) }; }
+    },
+
+    // A libretro save state, base64. The duel gate decodes work RAM out of this.
+    state: function () {
+      try { return b64(window.EJS_emulator.gameManager.getState()); }
+      catch (e) { return { error: String(e) }; }
+    },
+
+    // The live SRAM, read-only. getSaveFile(false) skips saveSaveFiles(), which
+    // would otherwise write the core's current SRAM over the file -- call the
+    // no-argument form shortly after a reload and you overwrite a good save with
+    // blanks and then correctly report blanks.
+    sram: function () {
+      try {
+        var d = window.EJS_emulator.gameManager.getSaveFile(false);
+        return d && d.length ? b64(d) : null;
+      } catch (e) { return null; }
+    },
+
+    // The SRAM as it is RIGHT NOW. saveSaveFiles() pushes the core's live SRAM
+    // into the FS copy first, so this sees writes the game has just made --
+    // sram() on its own returns whatever was last flushed, which during play is
+    // minutes stale.
+    //
+    // This writes, so it is for polling a running core only. Never call it
+    // shortly after a reload: it would put the core's not-yet-restored SRAM over
+    // a good save, and the test would then correctly report blanks.
+    sramNow: function () {
+      try {
+        var gm = window.EJS_emulator.gameManager;
+        gm.saveSaveFiles();
+        var d = gm.getSaveFile(false);
+        return d && d.length ? b64(d) : null;
+      } catch (e) { return null; }
+    },
+
+    // The save state and the SRAM image, taken together with no frame boundary
+    // between them. Fetching them in two calls is a race -- the core keeps
+    // running and rewrites SRAM -- so a comparison of the two would fail for
+    // reasons that have nothing to do with whether the state is being parsed
+    // correctly. This is synchronous JS, so the emulator's main loop cannot run
+    // in the middle of it.
+    snapshot: function () {
+      try {
+        var gm = window.EJS_emulator.gameManager;
+        gm.saveSaveFiles();                       // core SRAM -> the FS copy
+        var sram = gm.getSaveFile(false);         // read it back, no second write
+        var state = gm.getState();
+        return { sram: sram && sram.length ? b64(sram) : null, state: b64(state) };
+      } catch (e) { return { error: String(e) }; }
+    },
+
+    // Read emscripten's IDBFS store straight out of IndexedDB. Non-destructive,
+    // and it works with no core loaded at all -- which is the only honest way to
+    // see what survived a reload.
+    //
+    // The database name is ENUMERATED, never guessed: this emscripten names it
+    // after the mount point ("/data/saves"), not the old 'EM_FS_'+pathname, and
+    // indexedDB.open() CREATES a database that does not exist -- so a wrong guess
+    // invents an empty one and then reports "the save was lost".
+    idbSave: async function () {
+      var names = [];
+      try { names = (await indexedDB.databases()).map(function (d) { return String(d.name); }); }
+      catch (e) { /* fall through */ }
+      var dbName = names.find(function (n) { return n.indexOf("saves") !== -1; });
+      if (!dbName) return { databases: names, db: null, files: {} };
+      var db = await new Promise(function (res, rej) {
+        var r = indexedDB.open(dbName);
+        r.onsuccess = function () { res(r.result); };
+        r.onerror = function () { rej(r.error); };
+        r.onupgradeneeded = function () { try { r.transaction.abort(); } catch (e) {} };
+      }).catch(function () { return null; });
+      if (!db || !db.objectStoreNames.contains("FILE_DATA")) {
+        return { databases: names, db: dbName, files: {} };
+      }
+      var store = db.transaction("FILE_DATA", "readonly").objectStore("FILE_DATA");
+      var keys = await new Promise(function (res) {
+        var r = store.getAllKeys();
+        r.onsuccess = function () { res(r.result); }; r.onerror = function () { res([]); };
+      });
+      var get = function (k) {
+        return new Promise(function (res) {
+          var r = store.get(k);
+          r.onsuccess = function () { res(r.result); }; r.onerror = function () { res(null); };
+        });
+      };
+      var files = {}, blobs = {};
+      for (var i = 0; i < keys.length; i++) {
+        var rec = await get(keys[i]);
+        var c = rec && rec.contents;
+        if (c && (c.byteLength !== undefined || c.buffer)) {
+          var u = new Uint8Array(c.buffer ? c.buffer : c);
+          files[String(keys[i])] = u.length;
+          var d = await crypto.subtle.digest("SHA-1", u);
+          blobs[String(keys[i])] = { len: u.length, b64: b64(u), sha1: hex(d) };
+        }
+      }
+      return { databases: names, db: dbName, files: files, blobs: blobs,
+               keys: keys.map(String) };
+    },
+
+    loadRom: function (bytes, name) { return loadRom(bytes, name); }
+  };
+
+  // ------------------------------------------------------------------- picker
+  drop.addEventListener("click", function () { fileInput.click(); });
+  drop.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+  });
+  fileInput.addEventListener("change", async function () {
+    var f = fileInput.files && fileInput.files[0];
+    if (f) await loadRom(await f.arrayBuffer(), f.name);
+  });
+  ["dragenter", "dragover"].forEach(function (k) {
+    drop.addEventListener(k, function (e) { e.preventDefault(); drop.classList.add("hot"); });
+  });
+  ["dragleave", "drop"].forEach(function (k) {
+    drop.addEventListener(k, function (e) { e.preventDefault(); drop.classList.remove("hot"); });
+  });
+  drop.addEventListener("drop", async function (e) {
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) await loadRom(await f.arrayBuffer(), f.name);
+  });
+
+  // ?rom=<same-origin path> -- local test hook only. The CSP pins connect-src to
+  // 'self', so this cannot reach another origin and is useless for hosting a ROM
+  // remotely. The harness uses the real <input type=file> path instead.
+  if (Q.get("rom")) {
+    fetch(Q.get("rom")).then(function (r) { return r.arrayBuffer(); })
+      .then(function (b) { return loadRom(b, Q.get("rom").split("/").pop()); })
+      .catch(function (e) { fail("could not read " + Q.get("rom") + ": " + e); });
+  }
+})();
+</script>
+</body>
+</html>
